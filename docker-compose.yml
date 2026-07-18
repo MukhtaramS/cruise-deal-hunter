@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cruise}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cruise}
+      POSTGRES_DB: ${POSTGRES_DB:-cruise}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cruise} -d ${POSTGRES_DB:-cruise}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  scraper:
+    build: .
+    command: python -m app.scheduler
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot:
+    build: .
+    command: python -m app.bot
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
