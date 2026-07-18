@@ -56,6 +56,7 @@ cruise-deal-hunter/
 │       ├── kreuzfahrten.py   # kreuzfahrten.de server-rendered HTML — ACTIVE
 │       ├── cruise24.py       # cruise24.de server-rendered HTML, per-cabin prices — ACTIVE
 │       ├── kreuzfahrt_de.py  # kreuzfahrt.de via cruiseportal.de widget AJAX — ACTIVE
+│       ├── kreuzfahrtberater.py # kreuzfahrtberater.de Nuxt SSR devalue payload — ACTIVE
 │       └── dreamlines.py     # dreamlines.de — UNREGISTERED (Cloudflare, see below)
 ├── samples/                # raw saved portal pages (gitignored) — source for fixtures below
 └── tests/                  # deal rules, detector, dedup, alert format, scrapers
@@ -326,6 +327,50 @@ Quirks (all confirmed on real fragments, captured 2026-07-18):
   price only, cabin_type "inside" (same convention as other lead-price
   sources).
 
+### kreuzfahrtberater.py — Nuxt 3 SSR payload (devalue), no open list API
+kreuzfahrtberater.de is a Nuxt/Vue app — same company as Seascanner (the
+entry bundle literally embeds a seascanner.com brand config), but a
+different platform than seascanner.de's Dreamlake API: the seascanner-style
+`/api/packages/search` 404s here. Its own POST API (`/api/site/*`,
+`/api/voyage/getVoyageDetails`, …) exposes **no discoverable search/list
+endpoint** — every name guess 404'd while `/api/site/getConfiguration`
+answered 200, proving the URL pattern right and the endpoint hidden. The
+search page itself, however, is fully server-rendered:
+```
+GET https://www.kreuzfahrtberater.de/kreuzfahrten?page=N
+```
+Each page embeds a `<script id="__NUXT_DATA__">` payload in Nuxt's
+**devalue** format: one flat JSON array where nested values are integer
+indices into the same array. `_resolve()` walks that index graph (unwrapping
+`["Ref", i]` / `["ShallowReactive", i]` wrapper nodes); the voyage store is
+the dict with `voyages` + `totalResultCount` (31,734 total at recon
+2026-07-18), 10 records per page, `?page=N` pages are disjoint (verified).
+
+Voyage records are the richest of any source: absolute detail `url`, ISO
+dates, `departurePortName`, explicit English `cabinClass`, clean skip flags
+(`isPricingOnRequest`, `isNotOpenYet`). Quirks:
+- Prices are integer **cents** as strings ("169900" → 1699.00 EUR);
+  `cruiseOnly` price preferred, `combined` (flight-incl.) as fallback.
+- nights = endDate − startDate; the `duration` field counts "Tage" and
+  marketing titles disagree with it, date arithmetic doesn't.
+- Cruise line from the cdn.krfb.de logo slug
+  ("holland-america-line.929fa52b.png" → "Holland America Line") with an
+  acronym fix-up map (msc→MSC, aida→AIDA…); A-ROSA → "A Rosa" artifact.
+- **Deliberate fallback deviation**: `fetch()` calls `parse()` directly and
+  only routes through `parse_with_fallback` on exception. A past-the-end
+  page is ~1 MB of valid HTML with an EMPTY voyage store — treating that
+  as "0 offers from non-empty HTML" would burn a Groq call on every run's
+  final page. Missing payload/store or all-records-failed still raises →
+  normal Groq fallback. Pinned by tests both ways.
+- Includes river cruises; fixture is the full real 1 MB SSR page (devalue
+  indices are position-dependent — the payload cannot be trimmed without
+  breaking every reference).
+- **Request-count budget (hit live)**: at 1 req/3s the site served exactly
+  6 pages, then a hard 429 wall that outlasted the whole 35s retry ladder.
+  Mitigations: `max_pages=5`, `min_request_interval=6.0`, and `fetch()`
+  keeps partial results when a page still 429s after retries instead of
+  losing the run.
+
 ### ⚠️ dreamlines.py status — kept but UNREGISTERED
 dreamlines.de sits behind Cloudflare (403 for plain HTTP clients), so the
 scraper is not in SCRAPERS. Its selectors were never verified against the
@@ -421,6 +466,6 @@ make logs / make psql / make down
 First-time setup: `cp .env.example .env` → fill secrets → `make up` → `make migrate`.
 
 Active scrapers: `seascanner`, `cruiseportal24` (JSON APIs), `kreuzfahrten`,
-`cruise24` (server-rendered HTML), `kreuzfahrt_de` (widget AJAX fragment) —
-see their sections above. `dreamlines` exists but is unregistered pending
-Cloudflare.
+`cruise24` (server-rendered HTML), `kreuzfahrt_de` (widget AJAX fragment),
+`kreuzfahrtberater` (Nuxt SSR devalue payload) — see their sections above.
+`dreamlines` exists but is unregistered pending Cloudflare.
