@@ -18,7 +18,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -428,11 +428,20 @@ async def visafree(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     await chat.send_message("\n".join(lines), disable_web_page_preview=True)
 
+async def _post_init(app: Application) -> None:
+    await app.bot.set_my_commands([
+        BotCommand("start", "Set up or restart onboarding"),
+        BotCommand("settings", "Change your preferences"),
+        BotCommand("status", "Bot stats: scrapes, users, deals"),
+        BotCommand("top", "5 cheapest deals right now"),
+        BotCommand("visafree", "Cheapest visa-free deals (RU passport)"),
+        BotCommand("reset", "Reset your onboarding"),
+    ])
 
 # ------------------------------------------------------------------- wiring
 
 def build_application() -> Application:
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = Application.builder().token(settings.telegram_bot_token).post_init(_post_init).build()
     app.add_handler(CommandHandler("reset", reset), group=-1) 
     conversation = ConversationHandler(
         entry_points=[
