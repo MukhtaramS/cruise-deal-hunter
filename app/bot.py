@@ -447,7 +447,8 @@ def build_application() -> Application:
             LENGTH: [CallbackQueryHandler(on_length, pattern=r"^ob:len:")],
             DEPART: [CallbackQueryHandler(on_depart, pattern=r"^ob:dep:")],
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("reset", reset), ],
+        fallbacks=[CommandHandler("cancel", cancel),             
+                   CommandHandler("start", start), ],
     )
     app.add_handler(conversation)
     app.add_handler(CommandHandler("status", status))
