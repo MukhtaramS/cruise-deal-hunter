@@ -67,10 +67,11 @@ class PriceSnapshot(Base):
 
 
 class AlertSent(Base):
-    """Dedup ledger: one alert per (cruise, price level, profile). A new alert
-    fires only when the price drops below every previously alerted price for
-    that cruise within the same profile (see deals.alerted_at_or_below) —
-    profiles never suppress each other."""
+    """Dedup ledger: one alert per (cruise, price level, user chat). A new
+    alert fires only when the price drops below every previously alerted
+    price for that cruise for that user (see deals.alerted_at_or_below) —
+    users never suppress each other. chat_id 0 is the legacy/seed sentinel
+    used by the single-channel detect_hot_deals path."""
 
     __tablename__ = "alerts_sent"
 
@@ -78,8 +79,8 @@ class AlertSent(Base):
         ForeignKey("cruises.id", ondelete="CASCADE"), primary_key=True
     )
     price_eur: Mapped[Decimal] = mapped_column(Numeric(10, 2), primary_key=True)
-    profile: Mapped[str] = mapped_column(
-        String(32), primary_key=True, default="default", server_default="default"
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False, default=0, server_default="0"
     )
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -100,12 +101,21 @@ class RouteCountries(Base):
     )
 
 
-class TelegramChat(Base):
-    """Chats subscribed via /start; every hot-deal alert goes to all of them."""
+class User(Base):
+    """One Telegram user with onboarding preferences. Alerts are matched and
+    deduped per user (see app/matching.py + jobs.route_deals). All preference
+    fields are nullable = "no filter"; a user only receives alerts once
+    onboarded_at is set. departure_prefs is comma-separated region slugs
+    (mediterranean, northern_europe, caribbean, black_sea) — same CSV
+    convention as route_countries; NULL = any region."""
 
-    __tablename__ = "telegram_chats"
+    __tablename__ = "users"
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    subscribed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    home_region: Mapped[str | None] = mapped_column(String(32), nullable=True)  # de|uk|fr|cis|other
+    passport_country: Mapped[str | None] = mapped_column(String(32), nullable=True)  # RU|KZ|EU|UK|other
+    budget_per_night_max: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    trip_length_pref: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 2-4|5-9|10+
+    departure_prefs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

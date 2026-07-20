@@ -19,7 +19,8 @@ from decimal import Decimal
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.alerts import OutgoingAlert, format_alert, get_alert_chat_ids, send_alerts
+from app.alerts import OutgoingAlert, format_alert, send_alerts
+from app.jobs import load_recipients
 from app.db import session_scope
 from app.detector import detect_hot_deals
 from app.jobs import upsert_cruise
@@ -123,13 +124,15 @@ async def main() -> None:
     with session_scope() as session:
         seed(session, now)
         deals = detect_hot_deals(session, since=now - timedelta(seconds=1))
-        chat_ids = get_alert_chat_ids(session)
+        recipients = load_recipients(session)
     print(f"Seeded {len(SEED_OFFERS)} cruises with 30 days of history.")
     print(f"Detector flagged {len(deals)} hot deal(s):\n")
     for deal in deals:
         print(format_alert(deal))
         print()
-    await send_alerts([OutgoingAlert(deal=d) for d in deals], chat_ids)
+    # test tool: send the seeded alerts to every recipient, unfiltered
+    alerts = [OutgoingAlert(deal=d) for d in deals]
+    await send_alerts({r.chat_id: alerts for r in recipients})
 
 
 if __name__ == "__main__":

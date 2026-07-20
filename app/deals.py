@@ -50,17 +50,18 @@ def median_price_last_30d(
 
 
 def alerted_at_or_below(
-    session: Session, cruise_id: int, price_eur: Decimal, profile: str = "default"
+    session: Session, cruise_id: int, price_eur: Decimal, chat_id: int = 0
 ) -> bool:
-    """True if this profile already alerted this cruise at the same or a lower
-    price — only a fresh new low justifies another alert. Dedup is scoped per
-    profile so profiles never suppress each other."""
+    """True if this user already got an alert for this cruise at the same or
+    a lower price — only a fresh new low justifies another alert. Dedup is
+    scoped per chat so users never suppress each other. chat_id 0 is the
+    legacy/seed sentinel used by detect_hot_deals."""
     stmt = (
         select(AlertSent.cruise_id)
         .where(
             AlertSent.cruise_id == cruise_id,
             AlertSent.price_eur <= price_eur,
-            AlertSent.profile == profile,
+            AlertSent.chat_id == chat_id,
         )
         .limit(1)
     )

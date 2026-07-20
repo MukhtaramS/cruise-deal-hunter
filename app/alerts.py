@@ -1,33 +1,47 @@
-"""Alert formatting and delivery. Alerts go to every chat subscribed via
-/start (telegram_chats table), plus TELEGRAM_CHAT_ID from .env as fallback."""
+"""Alert formatting and per-user delivery.
+
+`send_alerts` takes a mapping of chat_id -> alerts (built by
+jobs.route_deals from each user's preferences). Every alert carries a
+verification footer with the price age and the portal deep link — scraped
+prices go stale, so the user is always told when we saw it."""
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from telegram import Bot
 
 from app.config import settings
 from app.detector import HotDeal
-from app.models import TelegramChat
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class OutgoingAlert:
-    """A deal that passed at least one profile's filters, plus presentation
-    flags. One OutgoingAlert = one Telegram message per chat."""
+    """A deal matched to a user, plus presentation flags. One OutgoingAlert
+    = one Telegram message to one chat."""
 
     deal: HotDeal
-    visa_free: bool = False  # passed the visa_ru filter -> gets a badge line
+    visa_free: bool = False  # route is fully visa-free (RU passport) -> badge
 
 
-def format_alert(deal: HotDeal, visa_free: bool = False) -> str:
+def price_age_minutes(scraped_at: datetime | None, now: datetime | None = None) -> int:
+    """Whole minutes since the price was scraped; 0 when unknown. Naive
+    timestamps (SQLite) are treated as UTC."""
+    if scraped_at is None:
+        return 0
+    if scraped_at.tzinfo is None:
+        scraped_at = scraped_at.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0, int((now - scraped_at).total_seconds() // 60))
+
+
+def format_alert(deal: HotDeal, visa_free: bool = False, now: datetime | None = None) -> str:
     """Spec format:
     🔥 -87% | AIDAnova, 7 nights, Hamburg, 12.09
     199€ (was 1499€ median)
+    🕐 Price checked 12 min ago — verify on site:
     <url>
     Falls back to a per-night header when the deal fired on the €/night rule
     without a meaningful drop vs the median.
@@ -45,33 +59,40 @@ def format_alert(deal: HotDeal, visa_free: bool = False) -> str:
     lines = [head, body]
     if visa_free:
         lines.append("✈️ Visa-free")
+    age = price_age_minutes(deal.scraped_at, now)
+    lines.append(f"🕐 Price checked {age} min ago — verify on site:")
     lines.append(deal.url)
     return "\n".join(lines)
 
 
-def get_alert_chat_ids(session: Session) -> list[str]:
-    ids = [str(cid) for cid in session.execute(select(TelegramChat.chat_id)).scalars()]
-    if settings.telegram_chat_id and settings.telegram_chat_id not in ids:
-        ids.append(settings.telegram_chat_id)
-    return ids
-
-
-async def send_alerts(alerts: list[OutgoingAlert], chat_ids: list[str]) -> None:
-    if not alerts:
+async def send_alerts(deliveries: dict[int, list[OutgoingAlert]]) -> None:
+    """Send each user their matched alerts. deliveries: chat_id -> alerts."""
+    total = sum(len(alerts) for alerts in deliveries.values())
+    if not total:
         return
-    texts = [format_alert(a.deal, visa_free=a.visa_free) for a in alerts]
-    if not settings.telegram_bot_token or not chat_ids:
+    if not settings.telegram_bot_token:
         log.warning(
-            "Telegram not configured (token or chat ids missing) — %d alert(s) not sent",
-            len(texts),
+            "Telegram not configured (token missing) — %d alert(s) not sent", total
         )
-        for text in texts:
-            log.info("ALERT (not sent):\n%s", text)
+        for chat_id, alerts in deliveries.items():
+            for alert in alerts:
+                log.info(
+                    "ALERT for %s (not sent):\n%s",
+                    chat_id, format_alert(alert.deal, alert.visa_free),
+                )
         return
     bot = Bot(settings.telegram_bot_token)
-    for chat_id in chat_ids:
-        for text in texts:
-            await bot.send_message(
-                chat_id=chat_id, text=text, disable_web_page_preview=True
-            )
-    log.info("Sent %d alert(s) to %d chat(s)", len(texts), len(chat_ids))
+    sent = 0
+    for chat_id, alerts in deliveries.items():
+        for alert in alerts:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=format_alert(alert.deal, alert.visa_free),
+                    disable_web_page_preview=True,
+                )
+                sent += 1
+            except Exception:
+                # one blocked/dead chat must not stop everyone else's alerts
+                log.exception("failed to send alert to chat %s", chat_id)
+    log.info("Sent %d/%d alert(s) to %d chat(s)", sent, total, len(deliveries))

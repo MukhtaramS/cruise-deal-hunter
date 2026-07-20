@@ -37,15 +37,16 @@ cruise-deal-hunter/
 │   ├── config.py           # Settings (pydantic-settings), exported as `settings`
 │   ├── db.py               # sync engine, SessionLocal, session_scope()
 │   ├── models.py           # Cruise, PriceSnapshot, AlertSent, TelegramChat, RouteCountries
-│   ├── profiles.py         # Profile definitions + PROFILE env var resolution
+│   ├── matching.py         # per-user deal matching + port→region map — NO LLM
+│   ├── onboarding.py       # conversation states, inline keyboards, value mappings
 │   ├── visa.py             # visa-free country set (RU) + route-country cache logic
-│   ├── deals.py            # hot-deal rules + median + per-profile dedup — NO LLM
+│   ├── deals.py            # hot-deal rules + median + per-chat dedup — NO LLM
 │   ├── detector.py         # find_hot_deals (pure detection); HotDeal dataclass
-│   ├── alerts.py           # OutgoingAlert, formatting + Telegram delivery
+│   ├── alerts.py           # OutgoingAlert, footer formatting + per-user delivery
 │   ├── llm.py              # Groq: fallback parser, cross-portal dedup, country inference
-│   ├── jobs.py             # pipeline: scrape -> store -> detect -> evaluate per profile -> alert
+│   ├── jobs.py             # pipeline: scrape -> store -> detect -> route per user -> alert
 │   ├── scheduler.py        # scraper service entrypoint (APScheduler, every 4h)
-│   ├── bot.py              # bot entrypoint (/start, /status, /top, /visafree)
+│   ├── bot.py              # bot entrypoint: onboarding, /settings, /status, /top, /visafree
 │   ├── seed.py             # fake price history + test alert (make seed)
 │   ├── scrape.py           # CLI: run one scraper (--source, --dry-run, --file)
 │   └── scrapers/
@@ -75,8 +76,8 @@ cruise-deal-hunter/
 |---|---|---|
 | `cruises` | id, source, cruise_line, ship, title, route_hash, departure_port, departure_date, nights, url | Unique on (source, url). `route_hash` indexed — same sailing across portals shares it |
 | `price_snapshots` | id, cruise_id FK, cabin_type, price_eur, scraped_at | One row per cruise/cabin per scrape. Index on (cruise_id, scraped_at) |
-| `alerts_sent` | cruise_id FK, price_eur, profile, sent_at | **Composite PK (cruise_id, price_eur, profile)**. Dedup rule *per profile*: a new alert fires only if the price is a fresh new low — anything already alerted at the **same or a lower** price within that profile suppresses it. Profiles never suppress each other |
-| `telegram_chats` | chat_id (BigInteger PK), subscribed_at | Chats subscribed via /start; alerts go to all of them (+ TELEGRAM_CHAT_ID env fallback) |
+| `alerts_sent` | cruise_id FK, price_eur, chat_id, sent_at | **Composite PK (cruise_id, price_eur, chat_id)**. Dedup rule *per user*: a new alert fires only if the price is a fresh new low — anything already alerted at the **same or a lower** price for that chat suppresses it. Users never suppress each other. chat_id 0 = legacy/seed sentinel (detect_hot_deals) |
+| `users` | chat_id (BigInteger PK), first_name, home_region, passport_country, budget_per_night_max, trip_length_pref, departure_prefs, onboarded_at | One row per Telegram user; all preference fields nullable = "no filter". departure_prefs is CSV of region slugs (same convention as route_countries — deliberate deviation from a native array type for SQLite-testability). Only users with onboarded_at set receive alerts. Migration 0004 replaced telegram_chats: old chats became onboarded users with no preferences (identical behavior to before) |
 | `route_countries` | route_hash PK, countries, inferred_at | LLM-inferred countries per route ("TR,GR", empty = LLM unsure, cached; no row = never asked / failed call, retried next run) |
 
 Migrations live in `alembic/versions/`. Autogenerate new ones with
@@ -115,10 +116,14 @@ stays silent, and a further drop to 149 alerts again.
 ```
 🔥 -87% | AIDAnova, 7 nights, Hamburg, 12.09
 199€ (was 1499€ median)
+🕐 Price checked 12 min ago — verify on site:
 https://portal.example/offer
 ```
 When the deal fired on the €/night rule with no real drop vs the median, the
-header shows `🔥 57€/night | …` instead of a percentage.
+header shows `🔥 57€/night | …` instead of a percentage. The footer (price
+age + deep link) is on EVERY alert — scraped prices go stale, so the user
+always sees when we saw it. `HotDeal.scraped_at` feeds the age; naive
+timestamps (SQLite) are treated as UTC.
 
 ### Scraper contract (app/scrapers/base.py)
 Every portal gets a `BaseScraper` subclass with a `source: ClassVar[str]` slug
@@ -390,22 +395,45 @@ sha1 over normalized (cruise_line, ship, departure_port, departure_date,
 nights). Primary cross-portal dedup mechanism. `app.llm.is_same_cruise(a, b)`
 is the fuzzy LLM fallback for spelling variants the hash can't catch.
 
-### Profiles (app/profiles.py) — PROFILE env var
-Two independent deal-hunting configurations share one codebase, DB, and bot:
-- `default` — all scrapers, no visa filter (the original behavior)
-- `visa_ru` — RU-relevant scrapers only, alerts **only** when ALL inferred
-  countries of a route are visa-free for Russian passports
-- `PROFILE=all` (the default) runs both in one process.
+### Multi-user model & onboarding (app/onboarding.py + app/bot.py)
+The bot is multi-user. `/start` runs a 5-step inline-keyboard
+ConversationHandler:
+1. booking region (de|uk|fr|cis|other) — required
+2. passport (RU|KZ|EU|UK|other) — required ("Other/Skip" stores `other`)
+3. max budget per night (60|120|200|no limit) — skippable via "No limit"
+4. trip length (2-4|5-9|10+|any) — skippable via "Any"
+5. departure regions — multi-select toggle (mediterranean, northern_europe,
+   caribbean, black_sea) with ✅ marks, plus "Any"/"Done"
 
-Mechanics: scraping uses the **union** of the active profiles' scraper lists.
-Detection (`find_hot_deals`) is profile-independent; `jobs.evaluate_deals`
-then filters/dedups **per profile** and records `alerts_sent` rows per
-profile. Because visa_ru's alert set is a subset of default's, a deal passing
-both profiles under "all" is sent as ONE message with a `✈️ Visa-free`
-badge line — never a duplicate. Running `PROFILE=visa_ru` alone
-sends only visa-free alerts, with dedup fully independent of default's
-history (migration 0003 seeded both profiles with pre-existing alerts so the
-switch doesn't replay old deals).
+The user row is written once at the end (`onboarded_at` = now); until then
+the user receives nothing. **Immediately after onboarding the bot sends the
+user's best current matching offer** (cheapest per-night among tracked
+future sailings passing their filters, `bot.best_current_match`) so value is
+proven in the first minute. `/settings` re-opens any single step via a menu
+and saves just that field. Keyboards/mappings live in app/onboarding.py,
+free of handler logic, so they're unit-testable without Telegram.
+
+### Per-user alert routing (app/matching.py + jobs.route_deals)
+This replaced the old PROFILE env system (profiles.py is gone; PROFILE in
+.env is ignored). Detection (`find_hot_deals`) stays preference-independent;
+`jobs.route_deals` then matches every candidate deal against every onboarded
+user:
+- **budget**: price_per_night <= budget_per_night_max (inclusive)
+- **trip length**: nights within the chosen range
+- **departure regions**: derived from departure_port via the curated static
+  PORT_REGIONS map in app/matching.py (ports normalized: cut at first
+  comma/paren, lowercase). An unclassifiable port matches only users WITHOUT
+  a departure pref — no guessing for picky users. Istanbul counts as
+  Mediterranean.
+- **passport**: RU → only fully visa-free routes (VISA_FREE_RU, unknown
+  countries fail conservatively); EU/UK/KZ/other/none → no visa filter.
+
+Dedup is per (cruise, price level, chat) in alerts_sent; users never
+suppress each other. Ledger rows are written in the same transaction as the
+snapshots. TELEGRAM_CHAT_ID from .env still works as an unfiltered
+pseudo-recipient when it isn't an onboarded user. Groq country inference
+runs only when at least one RU-passport recipient exists — zero LLM calls
+otherwise (same promise the old default profile made).
 
 ### Visa filter (app/visa.py)
 `VISA_FREE_RU` = ISO alpha-2 codes visa-free for RU passports (hand-
@@ -413,8 +441,7 @@ maintained). Ports/countries aren't in scraped data, so countries per route
 are inferred by Groq from title/ship/departure port (`llm.infer_countries`,
 batched 25/call) and cached forever in `route_countries` by route_hash.
 Unknown-countries routes conservatively NEVER pass the filter. A failed Groq
-call caches nothing (retried next run) and never crashes the pipeline. The
-default profile alone triggers zero LLM calls.
+call caches nothing (retried next run) and never crashes the pipeline.
 
 ### LLM boundaries
 Groq is used **only** in `app/llm.py` for (1) fallback HTML parsing,
@@ -429,12 +456,13 @@ async, then process them in one transaction, then send Telegram alerts async.
 ### Two services, one image
 `docker-compose.yml` runs the same image with different commands:
 `python -m app.scheduler` (scraper service) and `python -m app.bot` (bot
-service). Alerts are sent by the **scraper** service directly via the Bot API
-to every chat in `telegram_chats`; the bot service only answers commands:
-/start (subscribe, stores chat_id), /status (last scrape, cruises tracked,
-deals this week), /top (5 cheapest per-night current offers), /visafree
-(10 cheapest per-night among routes fully visa-free for RU passports — needs
-the route_countries cache, i.e. a scrape under PROFILE=visa_ru or all).
+service). Alerts are sent by the **scraper** service directly via the Bot
+API, routed per user (jobs.route_deals); the bot service runs onboarding and
+answers commands: /start (5-step onboarding), /settings (change any single
+preference), /status (last scrape, cruises tracked, users, alerts this
+week), /top (5 cheapest per-night current offers), /visafree (10 cheapest
+per-night fully visa-free routes — cache fills once an RU-passport user
+exists and a scrape has run).
 
 ### Testing alerts without waiting 30 days
 `make seed` (`python -m app.seed`) inserts three fake cruises under

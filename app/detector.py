@@ -35,6 +35,7 @@ class HotDeal:
     route_hash: str
     price_eur: Decimal
     median_30d: Decimal | None
+    scraped_at: datetime | None = None  # when this price was seen (alert footer)
 
     @property
     def price_per_night(self) -> Decimal:
@@ -89,22 +90,23 @@ def find_hot_deals(session: Session, since: datetime) -> list[HotDeal]:
                 route_hash=cruise.route_hash,
                 price_eur=snap.price_eur,
                 median_30d=median,
+                scraped_at=snap.scraped_at,
             )
         )
     return deals
 
 
 def detect_hot_deals(session: Session, since: datetime) -> list[HotDeal]:
-    """Single-profile ('default') convenience: find deals, skip those already
-    alerted at the same or a lower price, record the rest in alerts_sent.
-    Used by the seed script; the scheduler pipeline uses find_hot_deals +
-    jobs.evaluate_deals for profile-aware alerting."""
+    """Single-channel convenience: find deals, skip those already alerted at
+    the same or a lower price under the legacy/seed sentinel (chat_id 0),
+    record the rest. Used by the seed script; the scheduler pipeline uses
+    find_hot_deals + jobs.route_deals for per-user routing."""
     deals: list[HotDeal] = []
     for deal in find_hot_deals(session, since):
-        if alerted_at_or_below(session, deal.cruise_id, deal.price_eur, "default"):
+        if alerted_at_or_below(session, deal.cruise_id, deal.price_eur, 0):
             continue
         session.add(
-            AlertSent(cruise_id=deal.cruise_id, price_eur=deal.price_eur, profile="default")
+            AlertSent(cruise_id=deal.cruise_id, price_eur=deal.price_eur, chat_id=0)
         )
         deals.append(deal)
     return deals

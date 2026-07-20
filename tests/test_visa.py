@@ -5,10 +5,8 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from app.config import settings
-from app.jobs import evaluate_deals
-from app.models import AlertSent, Base, Cruise, PriceSnapshot, RouteCountries
-from app.profiles import PROFILES
+from app.jobs import load_recipients, route_deals
+from app.models import AlertSent, Base, Cruise, PriceSnapshot, RouteCountries, User
 from app.visa import VISA_FREE_RU, all_visa_free, ensure_countries, get_cached_countries
 
 NOW = datetime.now(timezone.utc)
@@ -63,14 +61,14 @@ class TestEnsureCountries:
         assert get_cached_countries(session, {"r1"}) == {}  # eligible for retry
 
 
-def make_cruise_with_drop(session, route_hash, suffix, price="199"):
+def make_cruise_with_drop(session, route_hash, suffix, price="199", port="Hamburg"):
     cruise = Cruise(
         source="test",
         cruise_line="AIDA",
         ship=f"Ship {suffix}",
         title=f"Cruise {suffix}",
         route_hash=route_hash,
-        departure_port="Port",
+        departure_port=port,
         departure_date=date(2026, 9, 12),
         nights=7,
         url=f"https://example.com/{suffix}",
@@ -103,61 +101,76 @@ def detect_candidates(session):
     return find_hot_deals(session, since=NOW - timedelta(seconds=1))
 
 
-class TestEvaluateDeals:
-    def test_default_profile_ignores_visa_and_skips_llm(self, session, monkeypatch):
+def make_user(session, chat_id, **prefs) -> User:
+    user = User(chat_id=chat_id, onboarded_at=NOW, **prefs)
+    session.add(user)
+    session.flush()
+    return user
+
+
+class TestRouteDeals:
+    def test_no_ru_user_means_no_llm_calls(self, session, monkeypatch):
         monkeypatch.setattr(
             "app.llm.infer_countries",
-            lambda items: pytest.fail("no LLM calls for the default profile"),
+            lambda items: pytest.fail("no LLM calls without an RU-passport user"),
         )
         make_cruise_with_drop(session, "r1", "a")
-        alerts = evaluate_deals(session, detect_candidates(session), [PROFILES["default"]])
-        assert len(alerts) == 1
-        assert alerts[0].visa_free is False
+        user = make_user(session, 111, passport_country="EU")
+        deliveries = route_deals(session, detect_candidates(session), [user])
+        assert len(deliveries[111]) == 1
+        assert deliveries[111][0].visa_free is False
 
-    def test_visa_ru_only_alerts_fully_visa_free_routes(self, session, monkeypatch):
+    def test_ru_user_only_gets_fully_visa_free_routes(self, session, monkeypatch):
         make_cruise_with_drop(session, "r_tr", "turkey")
         make_cruise_with_drop(session, "r_us", "usa")
         monkeypatch.setattr(
             "app.llm.infer_countries",
             lambda items: [["TR"] if "turkey" in i["title"] else ["US"] for i in items],
         )
-        alerts = evaluate_deals(session, detect_candidates(session), [PROFILES["visa_ru"]])
-        assert len(alerts) == 1
-        assert alerts[0].deal.route_hash == "r_tr"
-        assert alerts[0].visa_free is True
+        ru = make_user(session, 222, passport_country="RU")
+        deliveries = route_deals(session, detect_candidates(session), [ru])
+        assert len(deliveries[222]) == 1
+        assert deliveries[222][0].deal.route_hash == "r_tr"
+        assert deliveries[222][0].visa_free is True
 
-    def test_all_profiles_send_one_message_recorded_for_both(self, session, monkeypatch):
-        make_cruise_with_drop(session, "r_tr", "turkey")
-        monkeypatch.setattr("app.llm.infer_countries", lambda items: [["TR"]])
-        profiles = [PROFILES["default"], PROFILES["visa_ru"]]
-        alerts = evaluate_deals(session, detect_candidates(session), profiles)
-        assert len(alerts) == 1  # one message, badge instead of duplicate
-        assert alerts[0].visa_free is True
-        recorded = set(
-            session.execute(select(AlertSent.profile)).scalars()
-        )
-        assert recorded == {"default", "visa_ru"}
-
-    def test_profiles_do_not_suppress_each_other(self, session, monkeypatch):
-        cruise = make_cruise_with_drop(session, "r_tr", "turkey")
-        # default profile alerted this price earlier; visa_ru never did
+    def test_users_do_not_suppress_each_other(self, session, monkeypatch):
+        cruise = make_cruise_with_drop(session, "r1", "a")
+        # user A already got this exact price level; user B never did
         session.add(
-            AlertSent(cruise_id=cruise.id, price_eur=Decimal("199"), profile="default")
+            AlertSent(cruise_id=cruise.id, price_eur=Decimal("199"), chat_id=111)
         )
-        monkeypatch.setattr("app.llm.infer_countries", lambda items: [["TR"]])
-        alerts = evaluate_deals(
-            session, detect_candidates(session), [PROFILES["visa_ru"]]
-        )
-        assert len(alerts) == 1  # visa_ru's dedup is independent of default's
+        a = make_user(session, 111)
+        b = make_user(session, 333)
+        deliveries = route_deals(session, detect_candidates(session), [a, b])
+        assert 111 not in deliveries  # deduped for A
+        assert len(deliveries[333]) == 1  # B still gets it
 
-    def test_non_visa_free_deal_under_all_recorded_only_for_default(
-        self, session, monkeypatch
-    ):
-        make_cruise_with_drop(session, "r_us", "usa")
-        monkeypatch.setattr("app.llm.infer_countries", lambda items: [["US"]])
-        profiles = [PROFILES["default"], PROFILES["visa_ru"]]
-        alerts = evaluate_deals(session, detect_candidates(session), profiles)
-        assert len(alerts) == 1
-        assert alerts[0].visa_free is False
-        recorded = set(session.execute(select(AlertSent.profile)).scalars())
-        assert recorded == {"default"}
+    def test_alerts_recorded_per_user(self, session):
+        make_cruise_with_drop(session, "r1", "a")
+        a = make_user(session, 111)
+        b = make_user(session, 333)
+        route_deals(session, detect_candidates(session), [a, b])
+        recorded = set(session.execute(select(AlertSent.chat_id)).scalars())
+        assert recorded == {111, 333}
+
+
+class TestLoadRecipients:
+    def test_only_onboarded_users(self, session, monkeypatch):
+        monkeypatch.setattr("app.jobs.settings.telegram_chat_id", "", raising=False)
+        session.add(User(chat_id=1, onboarded_at=NOW))
+        session.add(User(chat_id=2, onboarded_at=None))  # mid-onboarding
+        session.flush()
+        assert [r.chat_id for r in load_recipients(session)] == [1]
+
+    def test_env_fallback_chat_added_once(self, session, monkeypatch):
+        monkeypatch.setattr("app.jobs.settings.telegram_chat_id", "999", raising=False)
+        session.add(User(chat_id=1, onboarded_at=NOW))
+        session.flush()
+        ids = sorted(r.chat_id for r in load_recipients(session))
+        assert ids == [1, 999]
+
+    def test_env_fallback_not_duplicated_when_user_exists(self, session, monkeypatch):
+        monkeypatch.setattr("app.jobs.settings.telegram_chat_id", "1", raising=False)
+        session.add(User(chat_id=1, onboarded_at=NOW))
+        session.flush()
+        assert [r.chat_id for r in load_recipients(session)] == [1]

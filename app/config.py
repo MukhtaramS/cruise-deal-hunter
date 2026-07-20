@@ -4,9 +4,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://cruise:cruise@localhost:5432/cruise"
 
-    # which deal-hunting configuration to run: a profile name from
-    # app/profiles.py ("default", "visa_ru") or "all" to run every profile
-    profile: str = "all"
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

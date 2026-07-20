@@ -63,25 +63,30 @@ async def main() -> None:
         print("dry run — nothing written")
         return
 
-    # real run: same profile-aware pipeline as the scheduler, this source only
-    from app.alerts import get_alert_chat_ids, send_alerts
+    # real run: same per-user pipeline as the scheduler, this source only
+    from app.alerts import send_alerts
     from app.db import session_scope
     from app.detector import find_hot_deals
-    from app.jobs import evaluate_deals, infer_fresh_route_countries, store_snapshots
-    from app.profiles import active_profiles
+    from app.jobs import (
+        infer_fresh_route_countries,
+        load_recipients,
+        needs_visa_data,
+        route_deals,
+        store_snapshots,
+    )
 
-    profiles = active_profiles()
     run_started = datetime.now(timezone.utc)
     with session_scope() as session:
         store_snapshots(session, offers, scraped_at=run_started)
-        if any(p.visa_filter for p in profiles):
+        recipients = load_recipients(session)
+        if needs_visa_data(recipients):
             infer_fresh_route_countries(session, since=run_started)
         candidates = find_hot_deals(session, since=run_started)
-        alerts = evaluate_deals(session, candidates, profiles)
-        chat_ids = get_alert_chat_ids(session)
-    await send_alerts(alerts, chat_ids)
+        deliveries = route_deals(session, candidates, recipients)
+    await send_alerts(deliveries)
     log.info(
-        "%s: %d offers stored, %d alert(s) sent", args.source, len(offers), len(alerts)
+        "%s: %d offers stored, %d alert(s) sent",
+        args.source, len(offers), sum(len(a) for a in deliveries.values()),
     )
 
 

@@ -158,7 +158,15 @@ class TestFormatAlert:
         lines = text.splitlines()
         assert lines[0] == "🔥 -87% | AIDAnova, 7 nights, Hamburg, 12.09"
         assert lines[1] == "199€ (was 1499€ median)"
-        assert lines[2] == "https://example.com/offer/1"
+        assert lines[2] == "🕐 Price checked 0 min ago — verify on site:"
+        assert lines[3] == "https://example.com/offer/1"
+
+    def test_footer_shows_price_age(self):
+        now = datetime.now(timezone.utc)
+        deal = self.make_deal(scraped_at=now - timedelta(minutes=42))
+        text = format_alert(deal, now=now)
+        assert "🕐 Price checked 42 min ago — verify on site:" in text
+        assert text.splitlines()[-1] == deal.url  # deep link is always last
 
     def test_per_night_variant_when_no_drop(self):
         text = format_alert(
