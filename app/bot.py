@@ -322,11 +322,6 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     assert chat is not None
 
-    # Optional: only allow your own Telegram account
-    if chat.id != YOUR_CHAT_ID:
-        await chat.send_message("Unknown command.")
-        return
-
     with session_scope() as session:
         user = session.get(User, chat.id)
         if user is not None:
@@ -438,6 +433,7 @@ async def visafree(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def build_application() -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
+    app.add_handler(CommandHandler("reset", reset), group=-1) 
     conversation = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -451,13 +447,12 @@ def build_application() -> Application:
             LENGTH: [CallbackQueryHandler(on_length, pattern=r"^ob:len:")],
             DEPART: [CallbackQueryHandler(on_depart, pattern=r"^ob:dep:")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("reset", reset), ],
     )
     app.add_handler(conversation)
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("visafree", visafree))
-    app.add_handler(CommandHandler("reset", reset))
     return app
 
 
