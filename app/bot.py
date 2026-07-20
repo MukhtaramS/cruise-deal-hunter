@@ -318,6 +318,31 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.effective_chat.send_message("Cancelled — nothing was changed.")
     return ConversationHandler.END
 
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    assert chat is not None
+
+    # Optional: only allow your own Telegram account
+    if chat.id != YOUR_CHAT_ID:
+        await chat.send_message("Unknown command.")
+        return
+
+    with session_scope() as session:
+        user = session.get(User, chat.id)
+        if user is not None:
+            user.home_region = None
+            user.passport_country = None
+            user.budget_per_night_max = None
+            user.trip_length_pref = None
+            user.departure_prefs = None
+            user.onboarded_at = None
+
+    context.user_data.clear()
+
+    await chat.send_message(
+        "✅ Onboarding reset.\n"
+        "Send /start to begin again."
+    )
 
 # ------------------------------------------------------------- info commands
 
@@ -432,6 +457,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("visafree", visafree))
+    app.add_handler(CommandHandler("reset", reset))
     return app
 
 
