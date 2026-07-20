@@ -144,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if onboarded:
         await chat.send_message(
             "🚢 You're already set up — deals matching your preferences land "
-            "here automatically.\nCommands: /settings, /status, /top, /visafree"
+            "here automatically.\nCommands: /settings, /status, /top, /visafree, /reset"
         )
         return ConversationHandler.END
     context.user_data.clear()
