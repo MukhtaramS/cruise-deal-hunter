@@ -60,9 +60,11 @@ cruise-deal-hunter/
 │       └── dreamlines.py     # dreamlines.de — UNREGISTERED (Cloudflare, see below)
 ├── samples/                # raw saved portal pages (gitignored) — source for fixtures below
 └── tests/                  # deal rules, detector, dedup, alert format, scrapers
-    └── fixtures/           # saved pages/responses the parser tests run against
-                            # seascanner.json, cruiseportal24*.json, kreuzfahrten.de.html
-                            # are all REAL captures, not synthetic
+    └── fixtures/           # saved pages/responses the parser tests run against —
+                            # REAL third-party captures, therefore GITIGNORED (local
+                            # only). Fresh clones must regenerate them via each
+                            # scraper's documented recon URL before running the
+                            # scraper test files
 ```
 
 ---
@@ -147,10 +149,14 @@ python -m app.scrape --source dreamlines                              # store + 
 ```
 
 ### Adding a scraper: fixture workflow
-Save a real results page to `samples/<portal>.html` (gitignored), trim it to a
-few representative cards (include one broken card) into
-`tests/fixtures/<portal>.html` (committed), write `parse` against it, verify
-with `python -m app.scrape --source <portal> --dry-run --file tests/fixtures/<portal>.html`.
+Save a real results page to `samples/<portal>.html`, trim it to a few
+representative cards (include one broken card) into
+`tests/fixtures/<portal>.html`, write `parse` against it, verify with
+`python -m app.scrape --source <portal> --dry-run --file tests/fixtures/<portal>.html`.
+Both directories are **gitignored** — fixtures are raw third-party content
+and stay local. On a fresh clone, scraper tests fail until fixtures are
+regenerated from each scraper's documented endpoint/page (see the per-
+scraper sections for the exact URLs).
 
 ### seascanner.py — the active scraper (JSON API, no HTML parsing)
 seascanner.de is a React app on the Dreamlake platform; results come from:

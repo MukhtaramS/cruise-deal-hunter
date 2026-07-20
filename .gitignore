@@ -1,6 +1,10 @@
 .env
 # raw saved portal pages (large); trimmed copies live in tests/fixtures/
 samples/
+# fixtures are raw third-party captures (HTML pages / API responses) —
+# kept locally for tests, never committed. Regenerate via the recon
+# steps documented per scraper in CLAUDE.md.
+tests/fixtures/
 __pycache__/
 *.pyc
 .venv/
